@@ -45,9 +45,21 @@ class EventFederationWorkerStore(EventsWorkerStore, SignatureWorkerStore,
         Returns:
             list of events
         """
+        def cb2(r):
+            logger.info("_get_events completed")
+            return r
+
+        def cb(r):
+            logger.info("got chain ids, deferring to _get_events")
+            res = self._get_events(r)
+            logger.info("_get_events returning deferred with called=%s paused=%s",
+                        res.called, res.paused)
+            res.addBoth(cb2)
+            return res
+
         return self.get_auth_chain_ids(
             event_ids, include_given=include_given,
-        ).addCallback(self._get_events)
+        ).addCallback(cb)
 
     def get_auth_chain_ids(self, event_ids, include_given=False):
         """Get auth events for given event_ids. The events *must* be state events.
