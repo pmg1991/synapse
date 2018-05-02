@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from synapse.util import logcontext
 from ._base import SQLBaseStore
 
 from twisted.internet import defer, reactor
@@ -290,6 +291,13 @@ class EventsWorkerStore(SQLBaseStore):
             defer.returnValue({})
 
         events_d = defer.Deferred()
+        ctx = logcontext.LoggingContext.current_context()
+
+        def cb(res):
+            logger.debug("got events for %s with result %s", ctx.request, res)
+            return res
+        events_d.addBoth(cb)
+
         with self._event_fetch_lock:
             self._event_fetch_list.append(
                 (events, events_d)
@@ -303,7 +311,10 @@ class EventsWorkerStore(SQLBaseStore):
             else:
                 should_start = False
 
+            logger.debug("Enqueued fetch request")
+
         if should_start:
+            logger.debug("Starting event fetcher thread")
             with PreserveLoggingContext():
                 self.runWithConnection(
                     self._do_fetch
