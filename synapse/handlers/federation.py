@@ -1458,6 +1458,7 @@ class FederationHandler(BaseHandler):
             allow_none=True,
             allow_rejected=True,
         )
+        logger.debug("Fetched persisted pdu %s from store", event_id)
 
         if event:
             if self.is_mine_id(event.event_id):
@@ -1477,12 +1478,14 @@ class FederationHandler(BaseHandler):
                     event.room_id,
                     origin
                 )
+                logger.debug("Did host_in_room check")
                 if not in_room:
                     raise AuthError(403, "Host not in room.")
 
                 events = yield self._filter_events_for_server(
                     origin, event.room_id, [event]
                 )
+                logger.debug("Did filtering")
 
                 event = events[0]
 

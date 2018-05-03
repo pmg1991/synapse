@@ -146,6 +146,8 @@ class EventsWorkerStore(SQLBaseStore):
         missing_events_ids = [e for e in event_ids if e not in event_entry_map]
 
         if missing_events_ids:
+            logger.debug("Fetching events %s from store %s",
+                         missing_events_ids)
             missing_events = yield self._enqueue_events(
                 missing_events_ids,
                 check_redacted=check_redacted,
@@ -294,7 +296,8 @@ class EventsWorkerStore(SQLBaseStore):
         ctx = logcontext.LoggingContext.current_context()
 
         def cb(res):
-            logger.debug("got events for %s with result %s", ctx.request, res)
+            logger.debug("got events for %s with result %s",
+                         getattr(ctx, 'request', None), res)
             return res
         events_d.addBoth(cb)
 
@@ -328,17 +331,32 @@ class EventsWorkerStore(SQLBaseStore):
         if not allow_rejected:
             rows[:] = [r for r in rows if not r["rejects"]]
 
+        def get(row):
+            logger.debug("Getting event %s from row for %s",
+                         row['event_id'],
+                         getattr(ctx, 'request', None))
+            res1 = run_in_background(self._get_event_from_row,
+                                     row["internal_metadata"], row["json"], row["redacts"],
+                                     rejected_reason=row["rejects"],
+                                     )
+
+            def cb(r):
+                logger.debug("Got event %s from row for %s",
+                    row['event_id'],
+                    getattr(ctx, 'request', None),
+                )
+                return r
+
+            res1.addBoth(cb)
+            return res1
+
         res = yield make_deferred_yieldable(defer.gatherResults(
             [
-                run_in_background(
-                    self._get_event_from_row,
-                    row["internal_metadata"], row["json"], row["redacts"],
-                    rejected_reason=row["rejects"],
-                )
-                for row in rows
+                get(row) for row in rows
             ],
             consumeErrors=True
         ))
+        logger.debug("Got all events from row")
 
         defer.returnValue({
             e.event.event_id: e
