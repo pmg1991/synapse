@@ -1099,14 +1099,16 @@ class EventsStore(EventsWorkerStore):
             ],
         )
 
+        chunk_id, topological_ordering = self._compute_chunk_id_txn(txn, event)
+
         self._simple_insert_many_txn(
             txn,
             table="events",
             values=[
                 {
                     "stream_ordering": event.internal_metadata.stream_ordering,
-                    "topological_ordering": event.depth,
-                    "depth": event.depth,
+                    "chunk_id": chunk_id,
+                    "topological_ordering": topological_ordering,
                     "event_id": event.event_id,
                     "room_id": event.room_id,
                     "type": event.type,
@@ -1334,6 +1336,113 @@ class EventsStore(EventsWorkerStore):
             "INSERT INTO redactions (event_id, redacts) VALUES (?,?)",
             (event.event_id, event.redacts)
         )
+
+    def _compute_chunk_id_txn(self, txn, event):
+        """Computes the chunk ID and topological ordering for an event.
+
+        Also handles updating chunk_graph table.
+
+        Args:
+            txn,
+            event (EventBase)
+
+        Returns:
+            tuple[int, int]: Returns the chunk_id, topological_ordering for
+            the event
+        """
+        prev_chunk_ids = set()
+        for eid, _ in event.prev_events:
+            chunk_id = self._simple_select_one_onecol_txn(
+                txn,
+                table="events",
+                keyvalues={"event_id": eid},
+                retcol="chunk_id",
+                allow_none=True,
+            )
+
+            # TODO: Handle null chunk, rather than just non-existent event
+
+            if chunk_id is not None:
+                prev_chunk_ids.add(chunk_id)
+
+        forward_events = self._simple_select_onecol_txn(
+            txn,
+            table="event_edges",
+            keyvalues={
+                "prev_event_id": event.event_id,
+                "is_state": False,
+            },
+            retcol="event_id",
+        )
+
+        forward_chunk_ids = set()
+        prev_events = set()
+        for eid in set(forward_events):
+            chunk_id = self._simple_select_one_onecol_txn(
+                txn,
+                table="events",
+                keyvalues={"event_id": eid},
+                retcol="chunk_id",
+                allow_none=True,
+            )
+
+            pes = self._simple_select_onecol_txn(
+                txn,
+                table="event_edges",
+                keyvalues={
+                    "event_id": eid,
+                    "is_state": False,
+                },
+                retcol="prev_event_id",
+            )
+
+            prev_events.update(pes)
+
+            # TODO: Handle null chunk, rather than just non-existent event
+
+            if chunk_id is not None:
+                forward_chunk_ids.add(chunk_id)
+
+        if len(prev_chunk_ids) == 1:
+            chunk_id = prev_chunk_ids.pop()
+        elif len(prev_chunk_ids) > 1:
+            chunk_id = self._chunk_id_gen.get_next()
+        elif len(prev_events) == 1 and len(forward_chunk_ids) == 1:
+            chunk_id = forward_chunk_ids.pop()
+        else:
+            chunk_id = self._chunk_id_gen.get_next()
+
+        sql = """
+            INSERT INTO chunk_graph (chunk_id, prev_id)
+            SELECT ?, ? WHERE NOT EXISTS (
+                SELECT 1 FROM chunk_graph
+                WHERE chunk_id = ? AND prev_id = ?
+            )
+        """
+
+        if prev_chunk_ids:
+            txn.executemany(sql, [
+                (chunk_id, pid, chunk_id, pid,)
+                for pid in prev_chunk_ids
+            ])
+
+        if forward_chunk_ids:
+            txn.executemany(sql, [
+                (fid, chunk_id, fid, chunk_id,)
+                for fid in forward_chunk_ids
+            ])
+
+        max_topo = self._simple_select_one_onecol_txn(
+            txn,
+            table="events",
+            keyvalues={
+                "room_id": event.room_id,
+                "chunk_id": chunk_id,
+            },
+            retcol="COALESCE(MAX(topological_ordering), 0)",
+        )
+
+        return chunk_id, max_topo + 1
 
     @defer.inlineCallbacks
     def have_events_in_timeline(self, event_ids):
