@@ -25,3 +25,14 @@ CREATE TABLE chunk_graph (
 
 CREATE UNIQUE INDEX chunk_graph_id ON chunk_graph (chunk_id, prev_id);
 CREATE INDEX chunk_graph_prev_id ON chunk_graph (prev_id);
+
+
+CREATE TABLE chunk_linearized (
+    chunk_id BIGINT NOT NULL,
+    prev_id BIGINT,
+    numerator BIGINT NOT NULL,
+    denominator BIGINT NOT NULL
+);
+
+CREATE UNIQUE INDEX chunk_linearized_id ON chunk_linearized (chunk_id);
+CREATE INDEX chunk_linearized_prev_id ON chunk_linearized (prev_id);

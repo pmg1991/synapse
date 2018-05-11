@@ -210,6 +210,7 @@ class MessageHandler(BaseHandler):
                 if room_token.topological:
                     max_topo = room_token.topological
                 else:
+                    #### FIXME #################
                     max_topo = yield self.store.get_max_topological_token(
                         room_id, room_token.stream
                     )

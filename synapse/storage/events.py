@@ -1404,33 +1404,60 @@ class EventsStore(EventsWorkerStore):
                 forward_chunk_ids.add(chunk_id)
 
         if len(prev_chunk_ids) == 1:
-            chunk_id = prev_chunk_ids.pop()
+            chunk_id = list(prev_chunk_ids)[0]
         elif len(prev_chunk_ids) > 1:
             chunk_id = self._chunk_id_gen.get_next()
         elif len(prev_events) == 1 and len(forward_chunk_ids) == 1:
-            chunk_id = forward_chunk_ids.pop()
+            chunk_id = list(forward_chunk_ids)[0]
         else:
             chunk_id = self._chunk_id_gen.get_next()
 
-        sql = """
-            INSERT INTO chunk_graph (chunk_id, prev_id)
-            SELECT ?, ? WHERE NOT EXISTS (
-                SELECT 1 FROM chunk_graph
-                WHERE chunk_id = ? AND prev_id = ?
-            )
-        """
+        current_prev_ids = self._simple_select_onecol_txn(
+            txn,
+            table="chunk_graph",
+            keyvalues={
+                "chunk_id": chunk_id,
+            },
+            retcol="prev_id",
+        )
+
+        current_forward_ids = self._simple_select_onecol_txn(
+            txn,
+            table="chunk_graph",
+            keyvalues={
+                "prev_id": chunk_id,
+            },
+            retcol="chunk_id",
+        )
+
+        prev_chunk_ids = [
+            pid for pid in prev_chunk_ids
+            if pid not in current_prev_ids and pid != chunk_id
+        ]
+        forward_chunk_ids = [
+            fid for fid in forward_chunk_ids
+            if fid not in current_forward_ids and fid != chunk_id
+        ]
 
         if prev_chunk_ids:
-            txn.executemany(sql, [
-                (chunk_id, pid, chunk_id, pid,)
-                for pid in prev_chunk_ids
-            ])
+            self._simple_insert_many_txn(
+                txn,
+                table="chunk_graph",
+                values=[
+                    {"chunk_id": chunk_id, "prev_id": pid}
+                    for pid in prev_chunk_ids
+                ]
+            )
 
-        if forward_chunk_ids:
-            txn.executemany(sql, [
-                (fid, chunk_id, fid, chunk_id,)
-                for fid in forward_chunk_ids
-            ])
+        if prev_chunk_ids:
+            self._simple_insert_many_txn(
+                txn,
+                table="chunk_graph",
+                values=[
+                    {"chunk_id": fid, "prev_id": chunk_id}
+                    for fid in forward_chunk_ids
+                ]
+            )
 
         max_topo = self._simple_select_one_onecol_txn(
             txn,

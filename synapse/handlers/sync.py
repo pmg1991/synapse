@@ -963,6 +963,9 @@ class SyncHandler(object):
 
             tags_by_room = yield self.store.get_tags_for_user(user_id)
 
+        logger.info("room_entries: %r", room_entries)
+        logger.info("invited: %r", invited)
+
         def handle_room_entries(room_entry):
             return self._generate_room_entry(
                 sync_result_builder,
