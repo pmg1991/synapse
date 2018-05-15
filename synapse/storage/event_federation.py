@@ -350,7 +350,7 @@ class EventFederationWorkerStore(EventsWorkerStore, SignatureWorkerStore,
                 allow_none=True,
             )
 
-            if depth:
+            if depth is not None:
                 queue.put((-depth, event_id))
 
         while not queue.empty() and len(event_results) < limit:

@@ -27,12 +27,22 @@ CREATE UNIQUE INDEX chunk_graph_id ON chunk_graph (chunk_id, prev_id);
 CREATE INDEX chunk_graph_prev_id ON chunk_graph (prev_id);
 
 
+CREATE TABLE chunk_backwards_extremities (
+    chunk_id BIGINT NOT NULL,
+    event_id TEXT NOT NULL
+);
+
+CREATE INDEX chunk_backwards_extremities_id ON chunk_backwards_extremities(chunk_id, event_id);
+CREATE INDEX chunk_backwards_extremities_event_id ON chunk_backwards_extremities(event_id);
+
+
 CREATE TABLE chunk_linearized (
     chunk_id BIGINT NOT NULL,
-    prev_id BIGINT,
+    room_id TEXT NOT NULL,
     numerator BIGINT NOT NULL,
-    denominator BIGINT NOT NULL
+    denominator BIGINT NOT NULL,
+    rational DOUBLE PRECISION NOT NULL
 );
 
 CREATE UNIQUE INDEX chunk_linearized_id ON chunk_linearized (chunk_id);
-CREATE INDEX chunk_linearized_prev_id ON chunk_linearized (prev_id);
+CREATE INDEX chunk_linearized_rational ON chunk_linearized (room_id, rational);

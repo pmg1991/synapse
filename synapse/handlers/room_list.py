@@ -360,6 +360,7 @@ class RoomListHandler(BaseHandler):
         visibility = None
         if visibility_event:
             visibility = visibility_event.content.get("history_visibility", None)
+        logger.info("world_readable %s: %s", room_id, visibility)
         result["world_readable"] = visibility == "world_readable"
 
         guest_event = current_state.get((EventTypes.GuestAccess, ""))

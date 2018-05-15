@@ -96,11 +96,12 @@ def upper_bound(token, engine, inclusive=True):
             # Postgres doesn't optimise ``(x > a) OR (x=a AND y>b)`` as well
             # as it optimises ``(x,y) > (a,b)`` on multicolumn indexes. So we
             # use the later form when running against postgres.
-            return "((%d,%d) >%s (%s,%s))" % (
-                token.topological, token.stream, inclusive,
+            return "(chunk_id = %d AND (%d,%d) >%s (%s,%s))" % (
+                token.chunk, token.topological, token.stream, inclusive,
                 "topological_ordering", "stream_ordering",
             )
-        return "(%d > %s OR (%d = %s AND %d >%s %s))" % (
+        return "(chunk_id = %d AND (%d > %s OR (%d = %s AND %d >%s %s)))" % (
+            token.chunk,
             token.topological, "topological_ordering",
             token.topological, "topological_ordering",
             token.stream, inclusive, "stream_ordering",
@@ -393,7 +394,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         end_token = RoomStreamToken.parse(end_token)
 
-        rows, token = yield self.runInteraction(
+        rows, token, _ = yield self.runInteraction(
             "get_recent_event_ids_for_room", self._paginate_room_events_txn,
             room_id, from_token=end_token, limit=limit,
         )
@@ -631,12 +632,12 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
             results["stream_ordering"],
         )
 
-        rows, start_token = self._paginate_room_events_txn(
+        rows, start_token, _ = self._paginate_room_events_txn(
             txn, room_id, before_token, direction='b', limit=before_limit,
         )
         events_before = [r.event_id for r in rows]
 
-        rows, end_token = self._paginate_room_events_txn(
+        rows, end_token, _ = self._paginate_room_events_txn(
             txn, room_id, after_token, direction='f', limit=after_limit,
         )
         events_after = [r.event_id for r in rows]
@@ -720,9 +721,9 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
                 those that match the filter.
 
         Returns:
-            Deferred[tuple[list[_EventDictReturn], str]]: Returns the results
-            as a list of _EventDictReturn and a token that points to the end
-            of the result set.
+            Deferred[tuple[list[_EventDictReturn], str, list[int]]: Returns
+            the results as a list of _EventDictReturn, a token that points to
+            the end of the result set, and a list of chunks iterated over.
         """
         # Tokens really represent positions between elements, but we use
         # the convention of pointing to the event before the gap. Hence
@@ -776,14 +777,21 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         rows = [_EventDictReturn(row[0], row[1], row[2], row[3]) for row in txn]
 
+        iterated_chunks = []
+
         chunk_id = None
         if from_token.chunk:  # FIXME: may be topological but no chunk.
             if rows:
                 chunk_id = rows[-1].chunk_id
+                iterated_chunks = [r.chunk_id for r in rows]
             else:
                 chunk_id = from_token.chunk
+                iterated_chunks = [chunk_id]
 
         while chunk_id and (limit <= 0 or len(rows) < limit):
+            if chunk_id not in iterated_chunks:
+                iterated_chunks.append(chunk_id)
+
             if direction == 'b':
                 # FIXME: There may be multiple things here
                 chunk_id = self._simple_select_one_onecol_txn(
@@ -848,7 +856,7 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
             # TODO (erikj): We should work out what to do here instead.
             next_token = to_token if to_token else from_token
 
-        return rows, str(next_token),
+        return rows, str(next_token), iterated_chunks,
 
     @defer.inlineCallbacks
     def paginate_room_events(self, room_id, from_key, to_key=None,
@@ -877,9 +885,31 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
         if to_key:
             to_key = RoomStreamToken.parse(to_key)
 
-        rows, token = yield self.runInteraction(
-            "paginate_room_events", self._paginate_room_events_txn,
-            room_id, from_key, to_key, direction, limit, event_filter,
+        def _do_paginate_room_events(txn):
+            rows, token, chunks = self._paginate_room_events_txn(
+                txn, room_id, from_key, to_key, direction, limit, event_filter,
+            )
+
+            extremities = []
+            seen = set()
+            for chunk_id in chunks:
+                if chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+
+                event_ids = self._simple_select_onecol_txn(
+                    txn,
+                    table="chunk_backwards_extremities",
+                    keyvalues={"chunk_id": chunk_id},
+                    retcol="event_id"
+                )
+
+                extremities.extend(e for e in event_ids if e not in extremities)
+
+            return rows, token, extremities
+
+        rows, token, extremities = yield self.runInteraction(
+            "paginate_room_events", _do_paginate_room_events,
         )
 
         events = yield self._get_events(
@@ -889,8 +919,49 @@ class StreamWorkerStore(EventsWorkerStore, SQLBaseStore):
 
         self._set_before_and_after(events, rows)
 
-        defer.returnValue((events, token))
+        defer.returnValue((events, token, extremities))
 
+    def clamp_token_before(self, room_id, token, clamp_to):
+        token = RoomStreamToken.parse(token)
+        clamp_to = RoomStreamToken.parse(clamp_to)
+
+        def clamp_token_before_txn(txn, token):
+            if not token.topological:
+                sql = """
+                    SELECT chunk_id, topological_ordering FROM events
+                    WHERE room_id = ? AND stream_ordering <= ?
+                    ORDER BY stream_ordering DESC
+                """
+                txn.execute(sql, (room_id, token.stream,))
+                row = txn.fetchone()
+                if not row:
+                    return str(token)
+
+                chunk_id, topo = row
+                token = RoomStreamToken(chunk_id, topo, token.stream)
+
+            if token.chunk == clamp_to.chunk:
+                if token.topological < clamp_to.topological:
+                    return str(token)
+                else:
+                    return str(clamp_to)
+
+            sql = "SELECT rationale FROM chunk_linearized WHERE chunk_id = ?"
+
+            txn.execute(sql, (token.chunk,))
+            token_order, = txn.fetchone()
+
+            txn.execute(sql, (clamp_to.chunk,))
+            clamp_order, = txn.fetchone()
+
+            if token_order < clamp_order:
+                return str(token)
+            else:
+                return str(clamp_to)
+
+        return self.runInteraction(
+            "clamp_token_before", clamp_token_before_txn, token
+        )
 
 class StreamStore(StreamWorkerStore):
     def get_room_max_stream_ordering(self):
